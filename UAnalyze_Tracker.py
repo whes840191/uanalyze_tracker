@@ -7,18 +7,13 @@ from zoneinfo import ZoneInfo
 # ==========================================
 # 參數與環境變數設定
 # ==========================================
-# 從環境變數讀取 LINE Token，若無則使用預設字串 (請確認已在終端機設定)
-LINE_CHANNEL_TOKEN = os.environ.get("LINE_CHANNEL_TOKEN", "你的LINE_TOKEN")
-LINE_USER_ID = os.environ.get("LINE_USER_ID", "你的LINE_USER_ID")
+LINE_CHANNEL_TOKEN = os.environ.get("LINE_CHANNEL_TOKEN", "")
+LINE_USER_ID = os.environ.get("LINE_USER_ID", "")
 
-# 登入頁與目標儀表板
-LOGIN_URL = "https://pro.uanalyze.com.tw/login"
+# 目標儀表板網址
 TARGET_URL = "https://pro.uanalyze.com.tw/lab/dashboard/45166"
 
-# 我們要追蹤的核心標的清單
-TARGET_STOCKS = ["2360 致茂", "8027 鈦昇"]
-
-# 儲存 Cookie 的本地資料夾路徑
+# 儲存登入 Cookie 的本地資料夾
 USER_DATA_DIR = "./playwright_profile"
 
 def send_line_message(text):
@@ -38,15 +33,14 @@ def send_line_message(text):
     else:
         print(f"LINE 發送失敗: {response.text}")
 
-def fetch_watchlist_with_cookie():
-    """載入 Cookie，登入並擷取追蹤標的"""
-    extracted_stocks = []
+def fetch_table_stocks():
+    """抓取優分析表格中的所有股票與摘要資訊"""
+    stock_items = []
     
     with sync_playwright() as p:
-        # 啟動具備狀態記憶的瀏覽器
         browser_context = p.chromium.launch_persistent_context(
             user_data_dir=USER_DATA_DIR,
-            headless=False,  # ★ 第一次測試請保持 False 以便手動登入
+            headless=False,  # 測試時保持 False 以便觀察畫面
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             viewport={"width": 1280, "height": 720}
         )
@@ -54,58 +48,57 @@ def fetch_watchlist_with_cookie():
         page = browser_context.pages[0]
 
         try:
-            print("前往優分析登入頁面...")
-            page.goto(LOGIN_URL)
-            
-            print("請在彈出的瀏覽器中，使用 Google 帳號完成登入。")
-            print("等待登入中 (最多等待 60 秒)...")
-            
-            # 給予 60 秒的時間讓你手動登入，登入成功後通常會自動跳轉
-            # 如果 60 秒內網址包含 dashboard，程式就會繼續
-            try:
-                page.wait_for_url("**/dashboard/**", timeout=60000)
-                print("偵測到登入成功，已進入儀表板！")
-            except:
-                print("等待時間結束或已經登入，強制導向目標儀表板...")
-            
-            # 確保前往我們指定的 45166 儀表板
+            print(f"前往目標網址: {TARGET_URL}")
             page.goto(TARGET_URL)
+            
+            # 等待頁面與表格資料完全載入
+            print("等待表格資料載入中...")
             page.wait_for_load_state("networkidle")
-            page.wait_for_timeout(3000) # 給予右側清單 3 秒的渲染緩衝
+            page.wait_for_timeout(5000) # 給予 5 秒渲染緩衝
 
-            print("開始掃描右側 Dingo 選股清單...")
-            for stock in TARGET_STOCKS:
-                # 尋找畫面上是否包含該股票文字
-                element = page.get_by_text(stock, exact=False)
+            # 定位表格中的每一列資料 (根據優分析常見的表格結構進行選取)
+            # 這裡我們尋找包含股票代號與名稱的列
+            rows = page.locator("tr")
+            row_count = rows.count()
+            print(f"總共掃描到 {row_count} 個表格列...")
+
+            for i in range(row_count):
+                row = rows.nth(i)
+                text = row.inner_text()
                 
-                if element.count() > 0 and element.first.is_visible():
-                    extracted_stocks.append(stock)
-                    print(f"成功找到追蹤標的：{stock}")
+                # 過濾並篩選出包含股票資料的列 (可根據畫面上的欄位特徵過濾)
+                # 這裡抓取包含具體內容的行
+                if text.strip():
+                    stock_items.append(text.strip())
                     
         except Exception as e:
             print(f"執行過程中發生錯誤: {e}")
         finally:
-            # 確實關閉瀏覽器以儲存 Cookie 狀態
             browser_context.close()
             
-    return extracted_stocks
+    return stock_items
 
 def main():
     now_tw = datetime.now(ZoneInfo("Asia/Taipei"))
-    print(f"--- 啟動優分析 Cookie 追蹤程式 ({now_tw.strftime('%Y-%m-%d')}) ---")
+    print(f"--- 啟動優分析全清單抓取程式 ({now_tw.strftime('%Y-%m-%d %H:%M')}) ---")
     
-    stocks = fetch_watchlist_with_cookie()
+    items = fetch_table_stocks()
     
-    if stocks:
-        message = f"【優分析追蹤標的狀態 - {now_tw.strftime('%m/%d')}】\n\n目前監控中的核心持股共 {len(stocks)} 檔：\n"
-        for stock in stocks:
-            message += f"• {stock}\n"
+    if items:
+        # 組合訊息，限制傳送長度避免超過 LINE 單則訊息限制
+        message = f"【優分析選股清單更新 - {now_tw.strftime('%m/%d %H:%M')}】\n\n"
+        for item in items[:15]:  # 預設取前 15 筆避免字數過多
+            message += f"• {item}\n-------------------\n"
             
         print("\n準備發送以下訊息至 LINE：")
         print(message)
-        send_line_message(message)
+        
+        if LINE_CHANNEL_TOKEN and LINE_USER_ID:
+            send_line_message(message)
+        else:
+            print("未偵測到 LINE 環境變數，跳過發送。")
     else:
-        print("今日未能抓取到任何指定的追蹤標的。")
+        print("今日未能抓取到任何表格資料。")
 
 if __name__ == "__main__":
     main()
